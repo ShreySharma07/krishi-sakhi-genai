@@ -5,3 +5,5 @@ langchain-openai
 python-dotenv
 langchain
 langchain-google-genai
+langchain-community
+chromadb
