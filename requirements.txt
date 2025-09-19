@@ -7,3 +7,5 @@ langchain
 langchain-google-genai
 langchain-community
 chromadb
+langchain-core
+pydantic

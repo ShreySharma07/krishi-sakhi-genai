@@ -1,6 +1,7 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
+from datetime import datetime
 from dotenv import load_dotenv
 from langchain.prompts import ChatPromptTemplate
 import os
@@ -12,10 +13,15 @@ from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains import create_retrieval_chain
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyMuPDFLoader
+from typing import List, Dict
+from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.runnables import RunnablePassthrough
+from langchain_openai import OpenAIEmbeddings
+
 
 load_dotenv()
 
-app = FastAPI()
+app = FastAPI(title="NilaMitra GenAI Microservice", version="1.0")
 
 model = os.getenv("GOOGLE_API_KEY")
 
@@ -31,7 +37,9 @@ class Query(BaseModel):
     language: str
     farmer_profile: dict
 
-embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-001", google_api_key=model)
+# embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=model)
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small", api_key=os.getenv("OPENAI_API_KEY"))
+
 
 KB_DIR = "knowledge_base"
 VECTOR_DB_DIR = "./chroma_db"
@@ -49,7 +57,7 @@ if not Path(VECTOR_DB_DIR).exists():
             loader = PyMuPDFLoader(os.path.join(KB_DIR, filename))
             docs.extend(loader.load())
     
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=250, chunk_overlap=100)
     splits = text_splitter.split_documents(docs)
 
     vectorstore = Chroma.from_documents(
@@ -65,33 +73,82 @@ else:
         embedding_function=embeddings
     )
 
-prompt_template = ChatPromptTemplate.from_messages([
-    ("system", "You are a helpful farmer assistant named Krishi Sakhi. Your responses must be in Malayalam based on the following context:\n\n{context}"),
-    ("human", "{input}")
-])
+class Activity(BaseModel):
+    date: str
+    activity: str
+
+class Profile(BaseModel):
+    location: str
+    land_size: str
+    crop: str
+    soil_type: str
+    irrigation: str
+
+class ExternalData(BaseModel):
+    weather: str
+    pest_alert: str
+
+class QueryRequest(BaseModel):
+    farmer_id: str
+    query_text: str
+    profile: Profile
+    activities: List[Activity]
+    external_data: ExternalData
+
+# Output Model
+class QueryResponse(BaseModel):
+    advisory_text_ml: str = Field(description="The full advisory text in Malayalam.")
+    advisory_text_en: str = Field(description="A concise English summary of the advisory.")
+    confidence: float = Field(description="The confidence score of the advisory from 0.0 to 1.0.")
+    recommendations: List[str] = Field(description="A list of specific, actionable recommendations for the farmer.")
+    metadata: Dict[str, str] = Field(description="Additional metadata, e.g., timestamp and model version.")
+
+parser = PydanticOutputParser(pydantic_object = QueryResponse)
+
+format_instructions = parser.get_format_instructions()
 
 retriever = vectorstore.as_retriever()
 
-document_chain = create_stuff_documents_chain(llm, prompt_template)
+rag_prompt = ChatPromptTemplate.from_messages([
+    ("system", "You are a helpful farmer assistant named Krishi Sakhi. Your responses must follow this schema:\n{format_instructions}\n\nContext:\n{context}"),
+    ("human", "{input}")
+])
+
+document_chain = create_stuff_documents_chain(llm, rag_prompt, output_parser=parser)
 retrieval_chain = create_retrieval_chain(retriever, document_chain)
 
+final_chain = retrieval_chain
 
+@app.post("/query", response_model=QueryResponse)
+async def ask_advisor(request: QueryRequest):
+    profile_json = request.profile.model_dump_json()
+    external_data_json = request.external_data.model_dump_json()
+    
+    activities_str = ", ".join([f"'{a.activity}' on {a.date}" for a in request.activities])
 
-
-@app.post("/api/ask")
-async def ask_advisor(query: Query):
-    print(f"Received contextual query from user {query.user_id}: {query.text}")
+    full_query = f"""
+        User Question: {request.query_text}
+        User Profile: {profile_json}
+        Recent Activities: {activities_str}
+        External Data: {external_data_json}
+    """
 
     try:
-        response = retrieval_chain.invoke({
-            'question':query.text,
-            'farmer_profile':query.farmer_profile
+        response = final_chain.invoke({
+            "input": full_query,
+            "format_instructions": parser.get_format_instructions()
         })
-        return {'response':response.content}
+        
+        return response
     except Exception as e:
-        print(f"LLM call failed: {e}")
-        return {"response": "ക്ഷമിക്കണം, എനിക്ക് ഇപ്പോൾ നിങ്ങളെ സഹായിക്കാൻ കഴിയില്ല. (Sorry, I can't help you right now.)"}
-
+        print(f"Error during structured output generation: {e}")
+        return QueryResponse(
+            advisory_text_ml="ക്ഷമിക്കണം, ഒരു പിശക് സംഭവിച്ചു. (Sorry, an error occurred.)",
+            advisory_text_en="An error occurred while generating the advisory.",
+            confidence=0.0,
+            recommendations=[],
+            metadata={"timestamp": datetime.utcnow().isoformat(), "error": str(e)}
+        )
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
