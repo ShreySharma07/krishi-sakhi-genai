@@ -76,19 +76,11 @@ document_chain = create_stuff_documents_chain(llm, prompt_template)
 retrieval_chain = create_retrieval_chain(retriever, document_chain)
 
 
+
+
 @app.post("/api/ask")
 async def ask_advisor(query: Query):
     print(f"Received contextual query from user {query.user_id}: {query.text}")
-    
-    # prompt_template = ChatPromptTemplate.from_messages(
-    #     [
-    #         ("system", "You are a helpful farmer assistant for farmers based in Kerala. Your response must be in Malayalam/English based on the user's preference."),
-    #         ("human", "Here is the farmer's profile: {farmer_profile}"),
-    #         ("human", "Farmer's question: {question}"),
-    #     ]
-    # )
-
-    # chain = prompt_template | llm
 
     try:
         response = retrieval_chain.invoke({
