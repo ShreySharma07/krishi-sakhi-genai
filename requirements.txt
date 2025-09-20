@@ -3,9 +3,12 @@ uvicorn
 langchain
 langchain-openai
 python-dotenv
-langchain
 langchain-google-genai
 langchain-community
 chromadb
 langchain-core
 pydantic
+langchain-chroma
+openai
+pymupdf
+langchain-text-splitters
