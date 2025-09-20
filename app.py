@@ -109,15 +109,19 @@ format_instructions = parser.get_format_instructions()
 
 retriever = vectorstore.as_retriever()
 
-rag_prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a helpful farmer assistant named Krishi Sakhi. Your responses must follow this schema:\n{format_instructions}\n\nContext:\n{context}"),
-    ("human", "{input}")
-])
-
-document_chain = create_stuff_documents_chain(llm, rag_prompt, output_parser=parser)
-retrieval_chain = create_retrieval_chain(retriever, document_chain)
-
-final_chain = retrieval_chain
+rag_chain = (
+    {
+        "context": (lambda x: x["input"]) | retriever, # Pass the "input" string to the retriever
+        "input": RunnablePassthrough(), # Pass the whole input dict to the next step
+        "format_instructions": RunnablePassthrough() # Pass the parser instructions to the next step
+    }
+    | ChatPromptTemplate.from_messages([
+        ("system", "You are a helpful farmer assistant named Krishi Sakhi. Your responses must be structured exactly as per the following instructions and schema. Use the provided context to answer the user's question.\n\n{format_instructions}\n\nContext:\n{context}"),
+        ("human", "{input}"),
+    ])
+    | llm
+    | parser
+)
 
 @app.post("/query", response_model=QueryResponse)
 async def ask_advisor(request: QueryRequest):
@@ -134,12 +138,12 @@ async def ask_advisor(request: QueryRequest):
     """
 
     try:
-        response = final_chain.invoke({
+        response = rag_chain.invoke({
             "input": full_query,
-            "format_instructions": parser.get_format_instructions()
+            "format_instructions": format_instructions
         })
         
-        return response
+        return response.model_dump()
     except Exception as e:
         print(f"Error during structured output generation: {e}")
         return QueryResponse(
@@ -148,7 +152,7 @@ async def ask_advisor(request: QueryRequest):
             confidence=0.0,
             recommendations=[],
             metadata={"timestamp": datetime.utcnow().isoformat(), "error": str(e)}
-        )
+        ).model_dump()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
