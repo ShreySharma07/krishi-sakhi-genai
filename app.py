@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, Form
 from pydantic import BaseModel, Field
 import uvicorn
 from datetime import datetime
@@ -17,6 +17,9 @@ from typing import List, Dict
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_openai import OpenAIEmbeddings
+from langchain_core.messages import HumanMessage, SystemMessage
+import base64
+import json
 
 
 load_dotenv()
@@ -95,6 +98,13 @@ class QueryRequest(BaseModel):
     activities: List[Activity]
     external_data: ExternalData
 
+class ImageQueryRequest(BaseModel):
+    farmer_id: str
+    profile: Profile
+    activities: List[Activity]
+    external_data: ExternalData
+    query_text: str = ""
+
 # Output Model
 class QueryResponse(BaseModel):
     advisory_text_ml: str = Field(description="The full advisory text in Malayalam.")
@@ -143,6 +153,58 @@ async def ask_advisor(request: QueryRequest):
             "format_instructions": format_instructions
         })
         
+        return response.model_dump()
+    except Exception as e:
+        print(f"Error during structured output generation: {e}")
+        return QueryResponse(
+            advisory_text_ml="ക്ഷമിക്കണം, ഒരു പിശക് സംഭവിച്ചു. (Sorry, an error occurred.)",
+            advisory_text_en="An error occurred while generating the advisory.",
+            confidence=0.0,
+            recommendations=[],
+            metadata={"timestamp": datetime.utcnow().isoformat(), "error": str(e)}
+        ).model_dump()
+
+@app.post("/image-query", reponse_model = QueryResponse)
+async def advisory_with_image(
+    image: UploadFile = Form(...),
+    farmer_id: str = Form(...),
+    profile: str = Form(...),
+    activities: str = Form(...),
+    external_data: str = Form(...),
+    query_text: str = Form(None)
+):
+    #loading the image
+    image_bytes = await image.read()
+    image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+
+    # Re-build our complex input from the Form data (JSON strings)
+    request_data = QueryRequest(
+        farmer_id = farmer_id,
+        query_text = query_text or "What is in this image?",
+        profile = json.loads(profile),
+        activities = json.loads(activities),
+        external_data = json.loads(external_data)
+    )
+
+    full_query = f"""
+        User Question: {request_data.query_text}
+        User Profile: {request_data.profile.model_dump_json()}
+        Recent Activities: {', '.join([f'{a.activity} on {a.date}' for a in request_data.activities])}
+        External Data: {request_data.external_data.model_dump_json()}"""
+
+    multimodal_input = [
+        HumanMessage(
+            content = [
+                {'type':"text", "text": f"""Analyze this image based on the following context. {full_query_text}"""},
+                {'type':"image_url", "image_url": {'url': f"data:image/{image.content_type};base64,{image_base64}"}}
+            ]
+        )
+    ]
+
+    llm = ChatGoogleGenerativeAI(model = 'gemini-2.5-flash', google_api_key = os.getenv('GOOGLE_API_KEY'))
+
+    try:
+        response = llm.invoke(multimodal_input)
         return response.model_dump()
     except Exception as e:
         print(f"Error during structured output generation: {e}")
